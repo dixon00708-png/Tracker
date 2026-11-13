@@ -189,6 +189,80 @@ def suggestion(lifts, item):
     return f"Stay at {where}. Add a rep to any set under {hi}.", top, False
 
 
+# ================================================================ exercise library
+# Type codes set the default rep range and how much weight to add when you top it out:
+#   C = barbell compound (6-10 reps, +5 lb)    L = heavy lower-body compound (5-8 reps, +10 lb)
+#   D = dumbbell (8-12, +5)    M = machine / cable (10-15, +5)    I = small isolation (12-15, +2.5)
+#   B = bodyweight (8-15; add weight once you top out)
+EXERCISE_TYPES = {"C": (6, 10, 5), "L": (5, 8, 10), "D": (8, 12, 5), "M": (10, 15, 5), "I": (12, 15, 2.5),
+                  "B": (8, 15, 5)}
+_LIB = """
+Chest|C:Bench press,Incline bench press,Decline bench press,Close-grip bench press,Floor press
+Chest|D:Dumbbell bench press,Incline DB press,Decline DB press,Dumbbell fly,Incline dumbbell fly,Dumbbell pullover
+Chest|M:Machine chest press,Incline machine press,Pec deck,Cable fly,Low-to-high cable fly,High-to-low cable fly,Smith machine bench press
+Chest|B:Push-ups,Dips,Weighted dips,Deficit push-ups
+Back|L:Deadlift,Rack pull
+Back|C:Barbell row,Pendlay row,T-bar row,Yates row
+Back|D:Dumbbell row,Single-arm dumbbell row,Chest-supported DB row,Dumbbell shrug
+Back|M:Lat pulldown,Close-grip lat pulldown,Single-arm pulldown,Seated cable row,Single-arm cable row,Machine row,Straight-arm pulldown,Face pull,Reverse pec deck,Back extension
+Back|B:Pull-ups,Chin-ups,Weighted pull-ups,Inverted row
+Back|C:Barbell shrug
+Shoulders|C:Overhead press,Push press,Seated barbell press
+Shoulders|D:Seated DB shoulder press,Arnold press,Dumbbell lateral raise,Dumbbell front raise,Rear delt fly
+Shoulders|M:Machine shoulder press,Single-arm cable lateral raise,Cable lateral raise,Cable front raise,Upright row
+Shoulders|I:Lateral raise (light),Y-raise
+Biceps|C:Barbell curl,EZ-bar curl
+Biceps|D:Dumbbell curl,Hammer curl,Incline dumbbell curl,Concentration curl,DB curl
+Biceps|M:Cable curl,Preacher curl,Machine curl,Bayesian cable curl
+Triceps|C:Skull crushers,JM press
+Triceps|D:Overhead dumbbell extension,Dumbbell kickback
+Triceps|M:Tricep pushdown,Rope pushdown,Overhead cable extension,Single-arm pushdown,Machine dip
+Triceps|B:Bench dips,Diamond push-ups
+Legs|L:Back squat,Front squat,Romanian deadlift,Sumo deadlift,Trap bar deadlift,Hip thrust
+Legs|C:Box squat,Good morning,Barbell lunge,Barbell step-up
+Legs|D:Bulgarian split squat,Goblet squat,Walking lunges,Reverse lunge,Dumbbell RDL,Step-ups,Single-leg RDL
+Legs|M:Leg press,Hack squat,Leg extension,Leg curl,Seated leg curl,Lying leg curl,Hip abductor,Hip adductor,Smith machine squat,Glute kickback (cable),Pendulum squat
+Legs|I:Calf raise,Seated calf raise,Standing calf raise,Single-leg calf raise,Tibialis raise
+Legs|B:Bodyweight squat,Pistol squat,Nordic curl,Glute bridge,Wall sit
+Core|M:Cable crunch,Pallof press,Ab wheel rollout,Woodchopper
+Core|B:Hanging leg raise,Plank,Side plank,Sit-ups,Dead bug,Russian twist,Decline sit-up
+Full body|C:Power clean,Hang clean,Snatch,Thruster
+Full body|D:Dumbbell snatch,Farmer's carry,Kettlebell swing,Turkish get-up
+Full body|B:Burpees,Box jumps,Sled push
+"""
+EXERCISE_LIB = {}   # name -> (group, type code)
+for _line in _LIB.strip().splitlines():
+    _head, _names = _line.split(":", 1)
+    _group, _code = _head.split("|")
+    for _n in _names.split(","):
+        EXERCISE_LIB.setdefault(_n.strip(), (_group, _code))
+
+
+def rep_range(S, name):
+    """[name, low, high, add] from your routines first, then the library, else a sensible default."""
+    for items in S.get("routines", {}).values():
+        for it in items:
+            if it[0].lower() == name.lower():
+                return it
+    code = EXERCISE_LIB.get(name, ("", "D"))[1]
+    return [name, *EXERCISE_TYPES[code]]
+
+
+def exercise_options(lifts, S):
+    """Everything you've logged or put in a routine first (most recent first), then the full library A-Z."""
+    seen, out = set(), []
+    for l in sorted(lifts, key=lambda x: x["date"], reverse=True):
+        for ex in l["exercises"]:
+            if ex["name"] not in seen:
+                seen.add(ex["name"]); out.append(ex["name"])
+    for items in S.get("routines", {}).values():
+        for it in items:
+            if it[0] not in seen:
+                seen.add(it[0]); out.append(it[0])
+    out += sorted(n for n in EXERCISE_LIB if n not in seen)
+    return out
+
+
 # ================================================================ bodyweight
 def week_avg_weight(checkins, monday):
     vals = [c["weight"] for d, c in checkins.items()
@@ -1141,49 +1215,123 @@ with tab_run:
                 st.success(f"Saved {r_miles:.2f} mi {r_type.lower()} run{pace}")
 
 # ================================================================ log lift
+def draft():
+    return st.session_state.setdefault("lift_draft", [])   # [{"name", "sets": int, "uid"}]
+
+
+def add_to_draft(name, n_sets=None):
+    name = name.strip()
+    if not name or any(d["name"].lower() == name.lower() for d in draft()):
+        return
+    last = last_for(lifts, name)
+    st.session_state["draft_uid"] = st.session_state.get("draft_uid", 0) + 1
+    draft().append({"name": name, "sets": n_sets or (len(last[1]) if last else 3),
+                    "uid": st.session_state["draft_uid"]})
+
+
 with tab_lift:
     st.subheader("Log a lift session")
-    days = list(S["routines"])
+    a, b, c = st.columns([1, 1, 2])
+    l_date = a.date_input("Date", today, key="lift_date")
+    labels = list(S["routines"]) + ["Upper", "Lower", "Full body", "Other"]
+    labels = list(dict.fromkeys(labels))
     plan_today = S["plan"].get(DAYS[today.weekday()], "").lower()
-    default_day = next((i for i, n in enumerate(days) if n.lower() in plan_today), 0)
-    a, b = st.columns(2)
-    l_day = a.selectbox("Day", days, index=default_day)
-    l_date = b.date_input("Date", today, key="lift_date")
-    st.caption("Type each exercise's sets as weight×reps separated by spaces, e.g. `185x8 185x8 185x7`. "
-               "Use `BW` for bodyweight (e.g. `BWx12`). Leave blank to skip.")
+    l_day = b.selectbox("Session", labels,
+                        index=next((i for i, n in enumerate(labels) if n.lower() in plan_today), 0))
+    with c:
+        st.caption("Quick start from a template")
+        tcols = st.columns(max(len(S["routines"]), 1))
+        for col, (rname, items) in zip(tcols, S["routines"].items()):
+            if col.button(f"+ {rname}", use_container_width=True, key=f"tmpl_{rname}"):
+                for it in items:
+                    add_to_draft(it[0])
+                st.rerun()
 
-    with st.form("lift_form", clear_on_submit=True):
-        entries = {}
-        for item in S["routines"][l_day]:
-            name, lo, hi, _ = item
-            text, w, up = suggestion(lifts, item)
-            last = last_for(lifts, name)
-            with st.container(border=True):
-                h1, h2 = st.columns([2, 3])
-                h1.markdown(f"**{name}**  \ntarget {lo}–{hi} reps")
-                h2.caption(f"Last ({last[0]}): {fmt_sets(last[1])}" if last else "No history yet")
-                (h2.success if up else h2.info)(text)
-                hint = f"{num(w)}x{lo} {num(w)}x{lo} {num(w)}x{lo}" if w else "e.g. 135x8 135x8 135x8"
-                entries[name] = st.text_input("Sets", key=f"sets_{l_day}_{name}", placeholder=hint,
-                                              label_visibility="collapsed")
+    # ---- add an exercise
+    with st.container(border=True):
+        st.markdown("**Add an exercise**")
+        a, b, c = st.columns([3, 1, 1])
+        opts = exercise_options(lifts, S)
+        try:   # Streamlit 1.45+: type to filter, or type a brand-new name
+            pick = a.selectbox("Exercise", opts, index=None, accept_new_options=True,
+                               placeholder="Start typing… e.g. bench, squat, curl", key="ex_pick")
+        except TypeError:   # older Streamlit: filter-only list plus a custom box
+            pick = a.selectbox("Exercise", opts, index=None, placeholder="Start typing…", key="ex_pick")
+            custom = a.text_input("…or type a custom exercise", key="ex_custom")
+            pick = custom.strip() or pick
+        last = last_for(lifts, pick) if pick else None
+        n_sets = b.number_input("Sets", 1, 12, len(last[1]) if last else 3, key=f"nsets_{pick}")
+        c.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if c.button("Add ➕", type="primary", use_container_width=True, disabled=not pick):
+            add_to_draft(pick, int(n_sets))
+            st.session_state.pop("ex_pick", None)
+            st.rerun()
+        if pick:
+            grp = EXERCISE_LIB.get(pick, ("Custom",))[0]
+            st.caption(f"{grp} · last time: {fmt_sets(last[1])} on {last[0]}" if last
+                       else f"{grp} · no history yet")
+
+    # ---- fill in weight and reps
+    if not draft():
+        st.info("Add the exercises you did (or tap a template), then fill in weight and reps for each set.")
+    rows = {}
+    for d in list(draft()):
+        item = rep_range(S, d["name"])
+        name, lo, hi, _ = item
+        text, w_sugg, up = suggestion(lifts, item)
+        last = last_for(lifts, name)
+        with st.container(border=True):
+            h1, h2, h3 = st.columns([2.2, 3, 0.6])
+            h1.markdown(f"**{name}**  \ntarget {lo}–{hi} reps")
+            h2.caption(f"Last ({last[0]}): {fmt_sets(last[1])}" if last else "No history yet")
+            (h2.success if up else h2.info)(text)
+            if h3.button("✕", key=f"rm_{d['uid']}", help="Remove"):
+                draft().remove(d)
+                st.rerun()
+
+            st.caption("Set the weight first, then type your reps in the table. "
+                        "Different weight on one set? Edit that cell.")
+            s1, s2 = st.columns([1, 3])
+            d["sets"] = int(s1.number_input("Sets", 1, 12, d["sets"], key=f"n_{d['uid']}"))
+            start_w = w_sugg if w_sugg is not None else (max(s["w"] for s in last[1]) if last else 0.0)
+            same_w = s2.number_input("Weight for all sets (lb, 0 = bodyweight)", 0.0, 2000.0,
+                                     float(start_w or 0.0), step=2.5, key=f"w_{d['uid']}")
+            df = pd.DataFrame({"set": range(1, d["sets"] + 1),
+                               "weight (lb)": [same_w] * d["sets"],
+                               "reps": [None] * d["sets"]})
+            rows[d["uid"]] = (name, st.data_editor(
+                df, key=f"ed_{d['uid']}_{d['sets']}_{same_w}", hide_index=True, use_container_width=True,
+                disabled=["set"],
+                column_config={"weight (lb)": st.column_config.NumberColumn(min_value=0, step=2.5),
+                               "reps": st.column_config.NumberColumn(min_value=0, max_value=100, step=1,
+                                                                     help="Reps you did")}))
+
+    if draft():
         l_notes = st.text_input("Session notes")
-        if st.form_submit_button("Save session", type="primary"):
-            exercises, bad = [], []
-            for name, txt in entries.items():
-                if txt.strip():
-                    try:
-                        exercises.append({"name": name, "sets": parse_sets(txt)})
-                    except ValueError:
-                        bad.append(name)
-            if bad:
-                st.error("Couldn't read sets for: " + ", ".join(bad) + ". Use weight×reps like 185x8.")
-            elif not exercises:
-                st.error("Enter sets for at least one exercise.")
+        a, b = st.columns([1, 4])
+        if a.button("Save session", type="primary", use_container_width=True):
+            exercises, missing = [], []
+            for uid, (name, edf) in rows.items():
+                sets = [{"w": float(r["weight (lb)"] or 0), "r": int(r["reps"])}
+                        for _, r in edf.iterrows() if pd.notna(r["reps"]) and r["reps"] > 0]
+                (exercises.append({"name": name, "sets": sets}) if sets else missing.append(name))
+            if not exercises:
+                st.error("Enter reps for at least one set.")
             else:
                 lifts.append({"date": l_date.isoformat(), "day": l_day, "exercises": exercises,
                               "notes": l_notes.strip()})
                 save(data)
-                st.success(f"Saved {l_day} session with {len(exercises)} exercises.")
+                st.session_state["lift_draft"] = []
+                msg = f"Saved {l_day} session: {len(exercises)} exercise{'s' * (len(exercises) != 1)}."
+                if missing:
+                    msg += " Skipped (no reps): " + ", ".join(missing) + "."
+                st.session_state["lift_saved_msg"] = msg
+                st.rerun()
+        if b.button("Clear all"):
+            st.session_state["lift_draft"] = []
+            st.rerun()
+    if "lift_saved_msg" in st.session_state:
+        st.success(st.session_state.pop("lift_saved_msg"))
 
 # ================================================================ history
 with tab_hist:
