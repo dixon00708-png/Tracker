@@ -487,6 +487,8 @@ HUD_CSS = """
 .stApp { background: radial-gradient(ellipse at top, #2a0a0d 0%, #0a0405 60%) fixed; }
 h1, h2, h3 { font-family: 'Orbitron', sans-serif !important; letter-spacing: .06em; color: #fff1f2 !important; }
 h1 { text-shadow: 0 0 18px rgba(239,68,68,.55); }
+.st-key-signout button { padding: 0 4px; min-height: 0; font-size: 12px; }
+.st-key-signout button p { font-size: 12px; }
 [data-testid="stMetric"] { background: rgba(239,68,68,.05); border: 1px solid rgba(239,68,68,.28);
     border-radius: 12px; padding: 12px 14px; box-shadow: inset 0 0 18px rgba(239,68,68,.06); }
 [data-testid="stMetricValue"] { font-family: 'Orbitron', sans-serif; color: #f87171; }
@@ -858,9 +860,19 @@ data = load()
 if st.session_state.pop("new_name", None) and not data["settings"].get("athlete_name"):
     data["settings"]["athlete_name"] = load_profiles()[PROFILE]["name"]
     save(data)
-with st.sidebar:
-    st.markdown(f"**Signed in as {load_profiles().get(PROFILE, {}).get('name', PROFILE)}**")
-    if st.button("Sign out"):
+# small "signed in as · sign out" line in the top-right corner
+_, corner = st.columns([6, 1.4])
+with corner:
+    who = load_profiles().get(PROFILE, {}).get("name", PROFILE)
+    n1, n2 = st.columns([1.6, 1])
+    n1.markdown(f"<div style='text-align:right;font-size:12px;opacity:.7;padding-top:6px;"
+                f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>👤 {who}</div>",
+                unsafe_allow_html=True)
+    try:
+        out = n2.button("Sign out", type="tertiary", key="signout")   # text-style button (Streamlit 1.43+)
+    except Exception:
+        out = n2.button("Sign out", key="signout")
+    if out:
         st.session_state.clear()
         st.rerun()
 S = data["settings"]
