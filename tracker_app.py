@@ -684,10 +684,111 @@ def render_task_briefing(S, tasks, today):
                  title="Here is your task briefing.")
 
 
+# ================================================================ profiles / sign-in
+# Each person gets their own data file under profiles/. A PIN keeps people out of each other's logs
+# (it's a light lock for friends and family, not bank-grade security).
+import hashlib
+import re
+import secrets
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROFILE_DIR = os.path.join(APP_DIR, "profiles")
+PROFILES_FILE = os.path.join(PROFILE_DIR, "profiles.json")
+LEGACY_FILE = os.path.join(APP_DIR, "tracker_data.json")   # single-user file from earlier versions
+
+
+def load_profiles():
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_profiles(p):
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    with open(PROFILES_FILE, "w") as f:
+        json.dump(p, f, indent=2)
+
+
+def slugify(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+
+
+def hash_pin(pin, salt):
+    return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt), 120_000).hex()
+
+
+def profile_file(slug):
+    return os.path.join(PROFILE_DIR, f"{slug}.json")
+
+
+def sign_in_screen():
+    profiles = load_profiles()
+    st.markdown("<div style='height:6vh'></div>", unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 1.3, 1])
+    with mid:
+        st.title("FITZGERALD")
+        st.caption("Sign in to your profile, or create one. Your data is kept separate from everyone else's.")
+        tab_in, tab_new = st.tabs(["Sign in", "New profile"])
+        with tab_in:
+            with st.form("signin"):
+                name = st.text_input("Name")
+                pin = st.text_input("PIN", type="password")
+                if st.form_submit_button("Sign in", type="primary"):
+                    p = profiles.get(slugify(name))
+                    if p and secrets.compare_digest(p["pin_hash"], hash_pin(pin, p["salt"])):
+                        st.session_state["profile"] = slugify(name)
+                        st.rerun()
+                    else:
+                        st.error("Name or PIN doesn't match.")
+        with tab_new:
+            with st.form("newprofile"):
+                name = st.text_input("Your name")
+                pin = st.text_input("Choose a PIN (4+ characters)", type="password")
+                pin2 = st.text_input("Confirm PIN", type="password")
+                legacy = (not profiles) and os.path.exists(LEGACY_FILE)
+                bring = st.checkbox("Bring in my existing data (tracker_data.json)", value=True) if legacy else False
+                if st.form_submit_button("Create profile", type="primary"):
+                    slug = slugify(name)
+                    if not slug:
+                        st.error("Enter a name.")
+                    elif slug in profiles:
+                        st.error("That name is taken. Sign in instead, or pick another name.")
+                    elif len(pin) < 4:
+                        st.error("PIN needs at least 4 characters.")
+                    elif pin != pin2:
+                        st.error("PINs don't match.")
+                    else:
+                        salt = secrets.token_hex(16)
+                        profiles[slug] = {"name": name.strip(), "salt": salt, "pin_hash": hash_pin(pin, salt)}
+                        save_profiles(profiles)
+                        if bring:
+                            with open(LEGACY_FILE) as src, open(profile_file(slug), "w") as dst:
+                                dst.write(src.read())
+                        st.session_state["profile"] = slug
+                        st.session_state["new_name"] = name.strip()
+                        st.rerun()
+    st.stop()
+
+
 # ================================================================ app
 st.set_page_config(page_title="Ultra + Lift Tracker", page_icon="🏃", layout="wide")
 st.markdown(HUD_CSS, unsafe_allow_html=True)
+
+if "profile" not in st.session_state:
+    sign_in_screen()
+PROFILE = st.session_state["profile"]
+DATA_FILE = profile_file(PROFILE)
+os.makedirs(PROFILE_DIR, exist_ok=True)
 data = load()
+if st.session_state.pop("new_name", None) and not data["settings"].get("athlete_name"):
+    data["settings"]["athlete_name"] = load_profiles()[PROFILE]["name"]
+    save(data)
+with st.sidebar:
+    st.markdown(f"**Signed in as {load_profiles().get(PROFILE, {}).get('name', PROFILE)}**")
+    if st.button("Sign out"):
+        st.session_state.clear()
+        st.rerun()
 S = data["settings"]
 S.setdefault("athlete_name", "")
 runs, lifts = data["runs"], data["lifts"]
