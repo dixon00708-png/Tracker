@@ -73,11 +73,103 @@ DEFAULT_SETTINGS = {
 
 
 # ================================================================ data
+# ================================================================ storage
+# Where data lives:
+#   * On your computer: plain JSON files next to this script (profiles/ folder).
+#   * Online: if a [github] section is set in Streamlit secrets, every file is saved to a PRIVATE
+#     GitHub repo instead, so nothing is lost when the free host restarts. Secrets format:
+#         [github]
+#         token  = "github_pat_..."          # fine-grained token, Contents: read & write on that repo
+#         repo   = "your-username/tracker-data"
+#         branch = "main"
+import base64
+import urllib.error
+import urllib.request
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _gh_cfg():
+    try:
+        cfg = st.secrets["github"]
+        return {"token": cfg["token"], "repo": cfg["repo"], "branch": cfg.get("branch", "main")}
+    except Exception:
+        return None
+
+
+GH = _gh_cfg()
+STORAGE_LABEL = "GitHub (permanent)" if GH else "this computer"
+
+
+def _cache():
+    return st.session_state.setdefault("_store_cache", {})   # path -> (obj, sha)
+
+
+def _gh_request(method, path, body=None):
+    url = f"https://api.github.com/repos/{GH['repo']}/contents/{path}"
+    if method == "GET":
+        url += f"?ref={GH['branch']}"
+    req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body else None, headers={
+        "Authorization": f"Bearer {GH['token']}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "fitzgerald-tracker"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())
+
+
+def _repo_path(abs_path):
+    return os.path.relpath(abs_path, APP_DIR).replace("\\", "/")
+
+
+def read_json(abs_path, fresh=False):
+    """Returns the stored object, or None if it doesn't exist yet."""
+    if not GH:
+        if os.path.exists(abs_path):
+            with open(abs_path) as f:
+                return json.load(f)
+        return None
+    path = _repo_path(abs_path)
+    if not fresh and path in _cache():
+        return json.loads(json.dumps(_cache()[path][0]))
+    try:
+        res = _gh_request("GET", path)
+        obj = json.loads(base64.b64decode(res["content"]).decode())
+        _cache()[path] = (obj, res["sha"])
+        return json.loads(json.dumps(obj))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            _cache()[path] = (None, None)
+            return None
+        st.error(f"Couldn't read your saved data from GitHub (error {e.code}). Check the token in Settings → Secrets.")
+        st.stop()
+
+
+def write_json(abs_path, obj):
+    if not GH:
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, "w") as f:
+            json.dump(obj, f, indent=2)
+        return
+    path = _repo_path(abs_path)
+    content = base64.b64encode(json.dumps(obj, indent=2).encode()).decode()
+    for attempt in range(2):
+        sha = _cache().get(path, (None, None))[1]
+        body = {"message": f"update {path}", "content": content, "branch": GH["branch"]}
+        if sha:
+            body["sha"] = sha
+        try:
+            res = _gh_request("PUT", path, body)
+            _cache()[path] = (json.loads(json.dumps(obj)), res["content"]["sha"])
+            return
+        except urllib.error.HTTPError as e:
+            if e.code in (409, 422) and attempt == 0:   # our copy was out of date: refresh and retry once
+                read_json(abs_path, fresh=True)
+                continue
+            st.error(f"Couldn't save to GitHub (error {e.code}). Your last change may not be stored.")
+            return
+
+
 def load():
-    data = {}
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f:
-            data = json.load(f)
+    data = read_json(DATA_FILE) or {}
     data.setdefault("settings", json.loads(json.dumps(DEFAULT_SETTINGS)))
     st_ = data["settings"]
     if "race_name" in st_ and "goal_name" not in st_:   # files saved before "race" became "goal"
@@ -99,8 +191,7 @@ def load():
 def save(data):
     clean = dict(data)
     clean["settings"] = {k: v for k, v in data["settings"].items() if not k.startswith("_")}
-    with open(DATA_FILE, "w") as f:
-        json.dump(clean, f, indent=2)
+    write_json(DATA_FILE, clean)
 
 
 def parse_date(s):
@@ -767,23 +858,17 @@ import hashlib
 import re
 import secrets
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(APP_DIR, "profiles")
 PROFILES_FILE = os.path.join(PROFILE_DIR, "profiles.json")
 LEGACY_FILE = os.path.join(APP_DIR, "tracker_data.json")   # single-user file from earlier versions
 
 
-def load_profiles():
-    if os.path.exists(PROFILES_FILE):
-        with open(PROFILES_FILE) as f:
-            return json.load(f)
-    return {}
+def load_profiles(fresh=False):
+    return read_json(PROFILES_FILE, fresh=fresh) or {}
 
 
 def save_profiles(p):
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    with open(PROFILES_FILE, "w") as f:
-        json.dump(p, f, indent=2)
+    write_json(PROFILES_FILE, p)
 
 
 def slugify(name):
@@ -799,12 +884,13 @@ def profile_file(slug):
 
 
 def sign_in_screen():
-    profiles = load_profiles()
+    profiles = load_profiles(fresh=True)   # always current, so new sign-ups from others are seen
     st.markdown("<div style='height:6vh'></div>", unsafe_allow_html=True)
     _, mid, _ = st.columns([1, 1.3, 1])
     with mid:
         st.title("FITZGERALD")
         st.caption("Sign in to your profile, or create one. Your data is kept separate from everyone else's.")
+        st.caption(f"Data is saved to: **{STORAGE_LABEL}**")
         tab_in, tab_new = st.tabs(["Sign in", "New profile"])
         with tab_in:
             with st.form("signin"):
@@ -822,7 +908,7 @@ def sign_in_screen():
                 name = st.text_input("Your name")
                 pin = st.text_input("Choose a PIN (4+ characters)", type="password")
                 pin2 = st.text_input("Confirm PIN", type="password")
-                legacy = (not profiles) and os.path.exists(LEGACY_FILE)
+                legacy = (not GH) and (not profiles) and os.path.exists(LEGACY_FILE)
                 bring = st.checkbox("Bring in my existing data (tracker_data.json)", value=True) if legacy else False
                 if st.form_submit_button("Create profile", type="primary"):
                     slug = slugify(name)
@@ -839,8 +925,8 @@ def sign_in_screen():
                         profiles[slug] = {"name": name.strip(), "salt": salt, "pin_hash": hash_pin(pin, salt)}
                         save_profiles(profiles)
                         if bring:
-                            with open(LEGACY_FILE) as src, open(profile_file(slug), "w") as dst:
-                                dst.write(src.read())
+                            with open(LEGACY_FILE) as src:
+                                write_json(profile_file(slug), json.load(src))
                         st.session_state["profile"] = slug
                         st.session_state["new_name"] = name.strip()
                         st.rerun()
@@ -855,7 +941,6 @@ if "profile" not in st.session_state:
     sign_in_screen()
 PROFILE = st.session_state["profile"]
 DATA_FILE = profile_file(PROFILE)
-os.makedirs(PROFILE_DIR, exist_ok=True)
 data = load()
 if st.session_state.pop("new_name", None) and not data["settings"].get("athlete_name"):
     data["settings"]["athlete_name"] = load_profiles()[PROFILE]["name"]
